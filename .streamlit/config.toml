@@ -1,0 +1,64 @@
+# Mobius theme — crisp, neutral, one accent. Light + dark both defined so the
+# in-app settings menu can toggle modes. Shared typography/shape live in [theme];
+# only colors differ per mode.
+
+[theme]
+font = "'Inter':https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+headingFont = "'Inter':https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700&display=swap"
+codeFont = "'JetBrains Mono':https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
+baseFontSize = 15
+baseFontWeight = 400
+codeFontSize = "0.85rem"
+headingFontSizes = ["30px", "22px", "18px", "15px", "14px", "13px"]
+headingFontWeights = [600, 600, 600, 600, 600, 600]
+baseRadius = "8px"
+buttonRadius = "8px"
+showWidgetBorder = true
+showSidebarBorder = true
+linkUnderline = false
+
+[theme.light]
+primaryColor = "#4F46E5"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F7F7F9"
+codeBackgroundColor = "#F4F4F6"
+textColor = "#18181B"
+linkColor = "#4F46E5"
+borderColor = "#E6E6EA"
+grayColor = "#71717A"
+blueColor = "#2563EB"
+greenColor = "#16A34A"
+redColor = "#DC2626"
+yellowColor = "#CA8A04"
+orangeColor = "#EA580C"
+violetColor = "#7C3AED"
+
+[theme.light.sidebar]
+backgroundColor = "#FAFAFB"
+secondaryBackgroundColor = "#F2F2F5"
+textColor = "#18181B"
+borderColor = "#E6E6EA"
+primaryColor = "#4F46E5"
+
+[theme.dark]
+primaryColor = "#818CF8"
+backgroundColor = "#0D0D11"
+secondaryBackgroundColor = "#16161C"
+codeBackgroundColor = "#1A1A21"
+textColor = "#E7E7EA"
+linkColor = "#A5B4FC"
+borderColor = "#2A2A33"
+grayColor = "#A1A1AA"
+blueColor = "#60A5FA"
+greenColor = "#4ADE80"
+redColor = "#F87171"
+yellowColor = "#FACC15"
+orangeColor = "#FB923C"
+violetColor = "#A78BFA"
+
+[theme.dark.sidebar]
+backgroundColor = "#0A0A0E"
+secondaryBackgroundColor = "#16161C"
+textColor = "#E7E7EA"
+borderColor = "#2A2A33"
+primaryColor = "#818CF8"

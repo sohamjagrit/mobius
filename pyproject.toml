@@ -1,0 +1,13 @@
+[project]
+name = "mobius"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic>=0.104.0",
+    "ipykernel>=7.2.0",
+    "jupyter>=1.1.1",
+    "python-dotenv>=1.2.2",
+    "docling",
+    "streamlit>=1.40",
+    "rapidfuzz>=3.14.5",
+]

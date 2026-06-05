@@ -1,0 +1,93 @@
+\documentclass[\VAR{ font_size }pt]{article}
+\usepackage[margin=\VAR{ margin }in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{xcolor}
+\usepackage{hyperref}
+
+\definecolor{accent}{HTML}{1F3A5F}
+\definecolor{rule}{HTML}{B8C2CC}
+
+\hypersetup{colorlinks=true, urlcolor=accent, linkcolor=accent, pdfborder={0 0 0}}
+\pagestyle{empty}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0pt}
+\setlength{\tabcolsep}{0pt}
+
+\setlist[itemize]{leftmargin=1.2em, itemsep=1pt, topsep=2pt, parsep=2pt, label=\textcolor{accent}{\small\textbullet}}
+
+\titleformat{\section}
+  {\normalsize\bfseries\scshape}{}{0pt}{}[{\color{rule}\titlerule[1pt]}]
+\titlespacing*{\section}{0pt}{1pt}{2.5pt}
+
+\newcommand{\entryhead}[2]{\noindent\textbf{#1}\hfill#2\par}
+\newcommand{\entrysub}[2]{\noindent\textit{#1}\hfill\textit{#2}\par}
+
+\begin{document}
+
+\begin{center}
+  {\LARGE\bfseries\color{accent}\VAR{ contact.name | esc }}\par
+%% if target_role
+  \vspace{3pt}
+  {\large \VAR{ target_role | esc }}\par
+%% endif
+  \vspace{3pt}
+  {\small \VAR{ contact_line }}
+\end{center}
+%% for section in section_order
+%% if section == 'education' and education
+\section{Education}
+\vspace{1pt}
+%% for edu in education
+\noindent\textbf{\VAR{ edu.institution | esc }, }\textit{\VAR{ edu.degree | esc }} \hfill \VAR{ edu.dates | esc }\par
+%% if edu.relevant_courses
+\noindent Relevant courses: \VAR{ edu.relevant_courses | join(', ') | esc } \hfill \VAR{ edu.location | esc }\par
+%% elif edu.location
+\noindent\hfill \VAR{ edu.location | esc }\par
+%% endif
+%% endfor
+%% elif section == 'experience' and experience
+\section{Experience}
+\vspace{1pt}
+%% for exp in experience
+\entryhead{\VAR{ exp.company | esc }}{\VAR{ exp.dates | esc }}
+\entrysub{\VAR{ exp.title | esc }}{\VAR{ exp.location | esc }}
+%% if exp.bullets
+\vspace{-3pt}
+\begin{itemize}
+%% for b in exp.bullets
+  \item \VAR{ b }
+%% endfor
+\end{itemize}
+%% endif
+%% endfor
+%% elif section == 'projects' and projects
+\section{Projects}
+\vspace{1pt}
+%% for proj in projects
+%% if proj.tools
+\entryhead{\VAR{ proj.name | esc }}{\textit{\VAR{ proj.tools | esc }}}
+%% else
+\entryhead{\VAR{ proj.name | esc }}{}
+%% endif
+%% if proj.bullets
+\vspace{-3pt}
+\begin{itemize}
+%% for b in proj.bullets
+  \item \VAR{ b }
+%% endfor
+\end{itemize}
+%% endif
+%% endfor
+%% elif section == 'skills' and skills
+\section{Skills}
+\vspace{1pt}
+%% for label, value in skills
+\noindent\textbf{\VAR{ label }:} \VAR{ value | esc }\par
+%% endfor
+%% endif
+%% endfor
+
+\end{document}
