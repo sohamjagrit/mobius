@@ -24,3 +24,7 @@ venv/
 profiles/
 tailored/
 resumes/
+
+# AI files
+CLAUDE.md
+plan.md
