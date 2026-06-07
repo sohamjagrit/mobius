@@ -16,9 +16,6 @@ Install Tectonic:
 # macOS
 brew install tectonic
 
-# Debian / Ubuntu
-apt install tectonic
-
 # Windows
 scoop install tectonic
 ```
