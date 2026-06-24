@@ -15,15 +15,16 @@ DELTA  = TAILORED / "delta"   # Stage 2 tailoring delta JSON
 RESUME = TAILORED / "resume"  # merged renderable resume JSON
 TEX    = TAILORED / "tex"
 PDF    = TAILORED / "pdf"
-AUDIT  = TAILORED / "audit"
 JD     = TAILORED / "jd"
 META   = TAILORED / "meta"
+APPLICATIONS = TAILORED / "applications"
 
 LAST_FILE = PROFILES / ".last"
+ROLES_FILE = PROFILES / "roles.json"  # registry of role resumes + shared budget
 
 
 def ensure_dirs() -> None:
-    for d in (PROFILES, DELTA, RESUME, TEX, PDF, AUDIT, JD, META):
+    for d in (PROFILES, DELTA, RESUME, TEX, PDF, JD, META, APPLICATIONS):
         d.mkdir(parents=True, exist_ok=True)
 
 
@@ -46,7 +47,6 @@ def run_paths(run_id: str) -> dict[str, Path]:
         "resume": RESUME / f"{run_id}.json",
         "tex":    TEX    / f"{run_id}.tex",
         "pdf":    PDF    / f"{run_id}.pdf",
-        "audit":  AUDIT  / f"{run_id}.json",
         "jd":     JD     / f"{run_id}.txt",
         "meta":   META   / f"{run_id}.json",
     }

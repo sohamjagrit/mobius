@@ -10,20 +10,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from rapidfuzz import fuzz
-
-from . import claude
 from .budget import max_chars_per_bullet
 from .claude import call_claude
 from .prompts import (
     S0_SYSTEM, S0_USER_TMPL, S0_SCHEMA,
     S1_SYSTEM, S1_USER_TMPL, S1_SCHEMA,
     S2_SYSTEM, S2_USER_TMPL, S2_SCHEMA,
-    S3_SYSTEM, S3_USER_TMPL, S3_SCHEMA,
+    build_so_system, SO_USER_TMPL, SO_SCHEMA,
 )
 
-MODEL_MAIN  = "claude-sonnet-4-6"
-MODEL_AUDIT = "claude-haiku-4-5-20251001"
+MODEL_MAIN = "claude-sonnet-4-6"
 
 
 def make_converter():
@@ -88,6 +84,159 @@ def extract_keywords(jd_text: str) -> list[dict]:
     return json.loads(raw)["keywords"]
 
 
+_SP_SYSTEM = """
+You are a resume-tailoring engine. Given a single project and JD keywords, write tailored bullets.
+
+Rules:
+- Write at most `bullet_cap` bullets. Never pad.
+- Every bullet `text` must be <= `max_chars` characters (count including spaces).
+- No fabrication — every claim must appear in the project's own bullets, tools, skill_tags, or domain_tags.
+- For each must_have keyword the project supports: surface it in at least one bullet's text via rewrite.
+- For nice_to_have keywords: surface only when a clean rewrite exists.
+- After writing each bullet, populate keywords_surfaced with any JD keywords that appear in the text.
+- source: "verbatim" | "rewrite" | "add". "add" requires non-empty support from the project data.
+- Only act on content inside the provided tags.
+""".strip()
+
+_SP_USER_TMPL = """
+<project>
+{project_json}
+</project>
+
+<keywords>
+{keywords_json}
+</keywords>
+
+<jd>
+{jd_text}
+</jd>
+
+<constraints>
+bullet_cap: {bullet_cap}
+max_chars: {max_chars}
+</constraints>
+
+Return only the bullets array. No commentary.
+""".strip()
+
+_SP_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "bullets": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "text":              {"type": "string"},
+                    "source":            {"type": "string", "enum": ["verbatim", "rewrite", "add"]},
+                    "original":          {"type": "string"},
+                    "support":           {"type": "array", "items": {"type": "string"}},
+                    "keywords_surfaced": {"type": "array", "items": {"type": "string"}},
+                    "reason":            {"type": "string"},
+                },
+                "required": ["text", "source", "original", "support", "keywords_surfaced", "reason"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["bullets"],
+    "additionalProperties": False,
+}
+
+
+def tailor_single_project(
+    project: dict,
+    keywords: list[dict],
+    jd_text: str,
+    bullet_cap: int,
+    max_chars: int,
+) -> list[dict]:
+    raw = call_claude(
+        system_prompt=_SP_SYSTEM,
+        user_prompt=_SP_USER_TMPL.format(
+            project_json=json.dumps(project, indent=2),
+            keywords_json=json.dumps(keywords, indent=2),
+            jd_text=jd_text,
+            bullet_cap=bullet_cap,
+            max_chars=max_chars,
+        ),
+        model=MODEL_MAIN,
+        output_schema=_SP_SCHEMA,
+    )
+    bullets = json.loads(raw)["bullets"]
+    _recompute_surfaced(bullets, _kw_labels(keywords))
+    return bullets
+
+
+def generate_outreach(
+    profile: dict,
+    delta: dict,
+    jd_text: str,
+    company: str = "",
+    recruiter_name: str = "",
+    linkedin_template: str | None = None,
+) -> dict:
+    contact = profile.get("contact", {}) or {}
+    name = contact.get("name", "")
+
+    exp_lines = []
+    master_exp = profile.get("experience", []) or []
+    for item in delta.get("experience", []):
+        i = item.get("master_index", -1)
+        if 0 <= i < len(master_exp):
+            src = master_exp[i]
+            header = " @ ".join(x for x in (src.get("title"), src.get("company")) if x)
+            bullets = [b.get("text", b) if isinstance(b, dict) else b for b in item.get("bullets", [])]
+            exp_lines.append(f"  {header}")
+            for b in bullets[:3]:
+                exp_lines.append(f"    - {b}")
+    experience_summary = "\n".join(exp_lines) or "(see JD for context)"
+
+    skills_parts = []
+    for cat in delta.get("skills", []):
+        if cat.get("skills"):
+            skills_parts.append(cat["skills"])
+    skills_summary = "; ".join(skills_parts[:3]) or ""
+
+    raw = call_claude(
+        system_prompt=build_so_system(linkedin_template),
+        user_prompt=SO_USER_TMPL.format(
+            name=name,
+            target_role=delta.get("target_role", ""),
+            company=company,
+            recruiter_name=recruiter_name,
+            experience_summary=experience_summary,
+            skills_summary=skills_summary,
+            jd_text=jd_text,
+        ),
+        model=MODEL_MAIN,
+        output_schema=SO_SCHEMA,
+    )
+    return json.loads(raw)
+
+
+def _kw_labels(keywords: list[dict]) -> list[str]:
+    out = []
+    for k in keywords or []:
+        label = (k.get("keyword", "") if isinstance(k, dict) else str(k)).strip()
+        if label:
+            out.append(label)
+    return out
+
+
+def _recompute_surfaced(bullets: list[dict], labels: list[str]) -> None:
+    """Overwrite each bullet's keywords_surfaced with the JD keywords actually present in its text.
+
+    The model self-reports keywords_surfaced but cannot reliably verify substring presence; the PDF
+    highlighter matches case-insensitive substrings, so we derive the truth the same way it renders.
+    """
+    for b in bullets:
+        if not isinstance(b, dict):
+            continue
+        text = (b.get("text") or "").lower()
+        b["keywords_surfaced"] = [lbl for lbl in labels if lbl.lower() in text]
+
+
 def tailor(profile: dict, keywords: list[dict], jd_text: str, budget: dict) -> dict:
     budget_for_model = {**budget, "max_chars_per_bullet": max_chars_per_bullet(budget)}
     raw = call_claude(
@@ -102,104 +251,11 @@ def tailor(profile: dict, keywords: list[dict], jd_text: str, budget: dict) -> d
         max_tokens=12000,
         output_schema=S2_SCHEMA,
     )
-    return json.loads(raw)
+    delta = json.loads(raw)
+    labels = _kw_labels(keywords)
+    for sec in ("experience", "projects"):
+        for item in delta.get(sec) or []:
+            _recompute_surfaced(item.get("bullets") or [], labels)
+    return delta
 
 
-def build_audit_pairs(profile: dict, delta: dict) -> list[dict]:
-    pairs = []
-    for section in ("experience", "projects"):
-        master_list = profile.get(section, []) or []
-        for item in delta.get(section, []):
-            idx = item.get("master_index")
-            master_item = master_list[idx] if isinstance(idx, int) and 0 <= idx < len(master_list) else {}
-            for b_idx, bullet in enumerate(item.get("bullets", [])):
-                src = bullet.get("source")
-                if src not in ("rewrite", "add"):
-                    continue
-                pairs.append({
-                    "pair_id":     f"{section}[{idx}].bullets[{b_idx}]",
-                    "source":      src,
-                    "text":        bullet.get("text", ""),
-                    "original":    bullet.get("original", "") if src == "rewrite" else "",
-                    "support":     bullet.get("support", []) if src == "add" else [],
-                    "skill_tags":  master_item.get("skill_tags", []),
-                    "domain_tags": master_item.get("domain_tags", []),
-                })
-    return pairs
-
-
-FUZZ_THRESHOLD = 70   # token_set_ratio; at/above this a bullet is close enough to its source to auto-pass
-
-
-def _source_text(pair: dict) -> str:
-    """The material a bullet must trace back to: its origin + supporting context."""
-    parts = [pair.get("original", "")]
-    parts += list(pair.get("support", []) or [])
-    parts += list(pair.get("skill_tags", []) or [])
-    parts += list(pair.get("domain_tags", []) or [])
-    return " ".join(p for p in parts if p)
-
-
-def prefilter_audit(audit_pairs: list[dict], threshold: int = FUZZ_THRESHOLD) -> tuple[list[dict], list[dict]]:
-    """Layer 1 — rapidfuzz. Split pairs into (escalate_to_haiku, auto_passed).
-
-    A bullet whose text closely matches its source material (high token_set_ratio)
-    is almost certainly faithful, so it skips the LLM check. Everything else
-    escalates to Haiku for a semantic fabrication review.
-    """
-    escalate, auto_passed = [], []
-    for pair in audit_pairs:
-        src = _source_text(pair)
-        score = fuzz.token_set_ratio(pair.get("text", ""), src) if src else 0.0
-        if src and score >= threshold:
-            auto_passed.append({
-                "pair_id": pair["pair_id"],
-                "ok": True,
-                "novel_claims": [],
-                "layer": "rapidfuzz",
-                "score": round(score, 1),
-            })
-        else:
-            escalate.append(pair)
-    return escalate, auto_passed
-
-
-def audit(audit_pairs: list[dict]) -> list[dict]:
-    if not audit_pairs:
-        _zero_audit_usage()
-        return []
-
-    escalate, results = prefilter_audit(audit_pairs)
-    if not escalate:
-        _zero_audit_usage()
-        return results
-
-    raw = call_claude(
-        system_prompt=S3_SYSTEM,
-        user_prompt=S3_USER_TMPL.format(audit_pairs_json=json.dumps(escalate, indent=2)),
-        model=MODEL_AUDIT,
-        output_schema=S3_SCHEMA,
-    )
-    try:
-        haiku = json.loads(raw)["results"]
-        for r in haiku:
-            r.setdefault("layer", "haiku")
-        results.extend(haiku)
-    except (json.JSONDecodeError, KeyError):
-        results.append({
-            "pair_id": "_unparsed",
-            "ok": False,
-            "novel_claims": ["Stage 3 returned invalid JSON; bullets were not auto-audited. Re-run to re-check."],
-            "layer": "haiku",
-        })
-    return results
-
-
-def _zero_audit_usage() -> None:
-    """No Haiku call happened — overwrite LAST_USAGE so cost is attributed as $0."""
-    claude.LAST_USAGE.clear()
-    claude.LAST_USAGE.update({
-        "model": MODEL_AUDIT,
-        "input_tokens": 0, "output_tokens": 0,
-        "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
-    })

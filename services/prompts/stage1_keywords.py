@@ -13,6 +13,7 @@ Extract technical keywords from a JD into a structured data object. Keywords are
   - Keywords are hard skills, named tools, frameworks, methodologies, domain terms, qualifications, and responsibilities. NOT soft skills, generic buzzwords, or vague concepts.
   - Categorize each: hard_skill | soft_skill | domain | responsibility | tool | qualification.
   - One concept per entry. Comma-separated and parenthetical lists are multiple entries, not one.
+  - Extract the specific skill or technology term, not a full noun phrase. Strip trailing generic category words (frameworks, tools, techniques, methods, systems, platforms, technologies, approaches, solutions, services, libraries) — they describe the category, not the skill. Examples: "deep learning frameworks" → "deep learning"; "containerization tools" → "Docker" or "Kubernetes" if the JD names them, else "containerization"; "cloud platforms" → the specific cloud name if named, else "cloud computing". If the JD names a specific tool within a category phrase, extract the specific tool, not the phrase.
   - Evidence rule: every keyword MUST have at least one verbatim phrase from the JD in its evidence array.
   - If a keyword is mentioned multiple times, create ONE entry with each verbatim mention added to evidence. Do not duplicate.
   - The JD is the ultimate source of truth. If something is not mentioned in the JD, it cannot be in the output.

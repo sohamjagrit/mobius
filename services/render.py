@@ -214,38 +214,42 @@ def compile_pdf(tex_path: Path) -> Path:
 def apply_delta(master: dict, delta: dict, budget: dict | None = None) -> dict:
     """Merge a Stage 2 delta into the master profile to produce a renderable resume.
 
-    The delta already contains only the selected items in JD-relevance order
-    (Stage 2 chose which items). Master provides structural fields the delta omits.
+    Stage 2 selects items by JD relevance but the rendered output is sorted by
+    master_index, preserving the original chronological order from the master resume.
     """
     master_exp  = master.get("experience", []) or []
     master_proj = master.get("projects", []) or []
     master_edu  = master.get("education", []) or []
 
-    edu_delta = {item["master_index"]: item for item in delta.get("education", [])}
+    def _sorted_by_master(items: list) -> list:
+        items.sort(key=lambda x: x.pop("_idx"))
+        return items
 
-    experience = []
+    exp_items = []
     for item in delta.get("experience", []):
         i = item["master_index"]
         if 0 <= i < len(master_exp):
-            merged = dict(master_exp[i])
-            merged["bullets"] = item["bullets"]
-            experience.append(merged)
+            merged = {**master_exp[i], "bullets": item["bullets"], "_idx": i}
+            exp_items.append(merged)
+    experience = _sorted_by_master(exp_items)
 
-    projects = []
+    proj_items = []
     for item in delta.get("projects", []):
         i = item["master_index"]
         if 0 <= i < len(master_proj):
-            merged = dict(master_proj[i])
-            merged["bullets"] = item["bullets"]
-            projects.append(merged)
+            merged = {**master_proj[i], "bullets": item["bullets"], "_idx": i}
+            proj_items.append(merged)
+    projects = _sorted_by_master(proj_items)
 
-    education = []
+    edu_items = []
     for item in delta.get("education", []):
         i = item["master_index"]
         if 0 <= i < len(master_edu):
-            merged = dict(master_edu[i])
-            merged["relevant_courses"] = item.get("relevant_courses", merged.get("relevant_courses", []))
-            education.append(merged)
+            merged = {**master_edu[i],
+                      "relevant_courses": item.get("relevant_courses", master_edu[i].get("relevant_courses", [])),
+                      "_idx": i}
+            edu_items.append(merged)
+    education = _sorted_by_master(edu_items)
 
     skills_raw = delta.get("skills", [])
     skills = (

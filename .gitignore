@@ -20,11 +20,16 @@ venv/
 .vscode/
 .idea/
 
-# User data (profiles, tailored outputs, saved JDs)
+# User data (profiles, tailored outputs, saved JDs, trials)
 profiles/
 tailored/
 resumes/
+research/
 
 # AI files
 CLAUDE.md
 plan.md
+.claude/
+
+# Streamlit secrets (keep config.toml tracked)
+.streamlit/secrets.toml

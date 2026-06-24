@@ -60,6 +60,47 @@ def _matches(keyword: str, haystack: str) -> bool:
     return kw in haystack
 
 
+def _master_corpus_parts(profile: dict) -> list[str]:
+    parts: list[str] = []
+    role = profile.get("target_roles", "")
+    if role:
+        parts.append(role)
+    for exp in profile.get("experience") or []:
+        parts.extend(b for b in exp.get("bullets") or [] if b)
+        parts.extend(exp.get("skill_tags") or [])
+        parts.extend(exp.get("domain_tags") or [])
+    for proj in profile.get("projects") or []:
+        parts.extend(b for b in proj.get("bullets") or [] if b)
+        parts.extend(proj.get("skill_tags") or [])
+        parts.extend(proj.get("domain_tags") or [])
+    for edu in profile.get("education") or []:
+        parts.extend(edu.get("relevant_courses") or [])
+    skills = profile.get("skills") or {}
+    if isinstance(skills, dict):
+        parts.extend(v for v in skills.values() if v)
+    return [p for p in parts if str(p).strip()]
+
+
+def scan_keywords_against_master(jd_keywords: list, profile: dict) -> dict:
+    """Deterministic pre-tailor scan: which JD keywords are already in the master profile."""
+    corpus = _norm(" ".join(_master_corpus_parts(profile)))
+    labels = [_kw_label(k) for k in (jd_keywords or [])]
+    labels = [x for x in labels if x]
+
+    covered: list[str] = []
+    missing: list[str] = []
+    for label in labels:
+        (covered if _matches(label, corpus) else missing).append(label)
+
+    total = len(labels)
+    return {
+        "total": total,
+        "covered": covered,
+        "missing": missing,
+        "pct": round(100 * len(covered) / total, 1) if total else 0.0,
+    }
+
+
 def scan_keywords(jd_keywords: list, delta: dict) -> dict:
     """Return coverage breakdown for the keyword panel."""
     corpus = _norm(" ".join(_corpus_parts(delta)))

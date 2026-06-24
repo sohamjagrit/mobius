@@ -10,13 +10,14 @@ import hashlib
 import json
 import re
 import tempfile
+from contextlib import nullcontext
 from datetime import date
 from pathlib import Path
 
 import streamlit as st
 
 import config
-from services import claude, history
+from services import claude, history, roles, thumbnails
 from services.budget import (
     estimate_lines, default_settings, valid_settings, skills_kept,
     calculate_char_budget, max_chars_per_bullet, bullet_overflows,
@@ -24,13 +25,14 @@ from services.budget import (
 )
 from services.pipeline import (
     make_converter, parse_resume, structure_profile,
-    extract_keywords, tailor, build_audit_pairs, audit,
+    extract_keywords, tailor, tailor_single_project, generate_outreach,
 )
-from services.keyword_scan import scan_keywords
+from services.prompts.stage_outreach import LINKEDIN_TEMPLATES
+from services.keyword_scan import scan_keywords, scan_keywords_against_master
 from services.render import render_latex, compile_latex_bytes, apply_delta
 
 ss = st.session_state
-RUN_KEYS = ("keywords", "tailored", "audit", "latex", "pdf_bytes", "pdf_bytes_clean", "kw_scan", "usages", "out_stem")
+RUN_KEYS = ("keywords", "tailored", "latex", "pdf_bytes", "pdf_bytes_clean", "kw_scan", "kw_scan_initial", "usages", "out_stem", "run_slug", "jd_analyzed_hash", "pre_scan", "outreach")
 
 
 # --- helpers -----------------------------------------------------------------
@@ -80,21 +82,41 @@ def clear_widget_state():
 
 
 def bootstrap():
-    """Load the last-used profile + settings into session, once per session."""
+    """Load the active role's profile + shared budget into session, once per session."""
     config.ensure_dirs()
     if "booted" in ss:
         return
     ss.booted = True
-    last = config.LAST_FILE.read_text(encoding="utf-8").strip() if config.LAST_FILE.exists() else ""
-    if not last:
+    roles.migrate_if_needed()
+    load_active_role()
+
+
+def load_active_role():
+    """Point session profile/hash/budget at the active role + shared budget."""
+    role = roles.active_role()
+    if not role:
         return
-    p, sp = config.profile_path(last), config.settings_path(last)
-    if not p.exists():
+    profile = roles.role_profile(role)
+    if profile is None:
         return
-    b = json.loads(sp.read_text(encoding="utf-8")) if sp.exists() else None
-    ss.profile_hash = last
-    ss.profile = json.loads(p.read_text(encoding="utf-8"))
+    ss.profile = profile
+    ss.profile_hash = role["hash"]
+    ss.active_role_id = role["id"]
+    ss.active_role_name = role["name"]
+    b = roles.get_settings()
     ss.budget = b if valid_settings(b) else None
+
+
+def select_role(role_id: str):
+    """Switch the active role: repoint session and reset any in-progress run."""
+    roles.set_active(role_id)
+    clear_widget_state()
+    for k in RUN_KEYS:
+        ss.pop(k, None)
+    for k in list(ss.keys()):
+        if k.startswith("ed_"):
+            ss.pop(k, None)
+    load_active_role()
 
 
 def has_profile() -> bool:
@@ -132,8 +154,11 @@ def load_master(data: bytes, filename: str):
             u = capture_usage("Stage 0 · profile")
             status.update(label=f"Profile ready · ${u['cost']:.4f}", state="complete")
     ss.profile_hash = file_hash
-    sp = config.settings_path(file_hash)
-    b = json.loads(sp.read_text(encoding="utf-8")) if sp.exists() else None
+    default_name = Path(filename).stem.replace("_", " ").replace("-", " ").strip() or "Resume"
+    role = roles.add_role(default_name, file_hash, make_active=True)
+    ss.active_role_id = role["id"]
+    ss.active_role_name = role["name"]
+    b = roles.get_settings()
     ss.budget = b if valid_settings(b) else None
     clear_widget_state()
     for k in RUN_KEYS:
@@ -369,6 +394,76 @@ def page_fit_selection(profile: dict) -> dict:
     return settings
 
 
+# --- roles -------------------------------------------------------------------
+def role_manager():
+    """Onboarding: list role resumes, switch active, rename, delete."""
+    rs = roles.list_roles()
+    if not rs:
+        return
+    reg_active = ss.get("active_role_id")
+    st.subheader("Your role resumes", divider="gray")
+    st.caption("One base resume per role (e.g. DS, MLE, AIE). Pick which to tailor on the Tailor page.")
+    for r in rs:
+        is_active = r["id"] == reg_active
+        c1, c2, c3 = st.columns([3, 1, 1])
+        c1.markdown(f"**{r['name']}**" + (" :green-badge[active]" if is_active else ""))
+        if c2.button("Use", key=f"role_use_{r['id']}", disabled=is_active, use_container_width=True):
+            select_role(r["id"])
+            st.rerun()
+        if c3.button("Delete", key=f"role_del_{r['id']}", disabled=len(rs) == 1, use_container_width=True):
+            roles.remove_role(r["id"])
+            if is_active:
+                load_active_role()
+            st.rerun()
+
+    cur = roles.get_role(reg_active)
+    if cur:
+        rc1, rc2 = st.columns([3, 1])
+        new_name = rc1.text_input("Rename active role", value=cur["name"], key="role_rename_input")
+        if rc2.button("Rename", key="role_rename_btn", use_container_width=True) and new_name.strip() != cur["name"]:
+            roles.rename_role(cur["id"], new_name)
+            ss.active_role_name = new_name.strip()
+            st.rerun()
+
+
+def role_bar():
+    """Tailor: pick which role resume to tailor via thumbnail tiles; add one inline."""
+    rs = roles.list_roles()
+    active = ss.get("active_role_id")
+    settings = ss.get("budget") or {}
+
+    head1, head2 = st.columns([4, 1])
+    head1.caption("Role resume to tailor — pick which base resume this JD is tailored from.")
+    head2.page_link("pages/1_onboarding.py", label="Manage", icon=":material/settings:")
+
+    per_row = 4
+    for start in range(0, len(rs), per_row):
+        cols = st.columns(per_row)
+        for col, r in zip(cols, rs[start:start + per_row]):
+            with col, st.container(border=True):
+                is_active = r["id"] == active
+                profile = roles.role_profile(r) or {}
+                ctx = nullcontext() if thumbnails.is_cached(profile, settings) else st.spinner("Building preview…")
+                with ctx:
+                    png = thumbnails.role_thumbnail(profile, settings)
+                if png:
+                    st.image(png, width=118)
+                else:
+                    st.caption(":material/description: Preview unavailable")
+                st.markdown(f"**{r['name']}**" + (" :green-badge[active]" if is_active else ""))
+                if st.button("Use", key=f"tile_use_{r['id']}", disabled=is_active, use_container_width=True):
+                    select_role(r["id"])
+                    st.rerun()
+
+    with st.expander("Add another resume", icon=":material/add:", expanded=not rs):
+        st.caption("Upload another base resume (PDF or DOCX). It is parsed once and becomes a new role you can pick above.")
+        up = st.file_uploader("Add resume", type=["pdf", "docx"], key="tailor_add_role",
+                              label_visibility="collapsed")
+        if up is not None and hashlib.sha256(up.getvalue()).hexdigest() != ss.get("profile_hash"):
+            load_master(up.getvalue(), up.name)
+            st.rerun()
+
+
 # --- render / compile --------------------------------------------------------
 def compile_resume_outputs(renderable: dict, budget: dict, paths: dict) -> tuple[str, bytes | None, bytes | None]:
     """Preview LaTeX/PDF with keyword highlights; on-disk + download PDF without."""
@@ -386,9 +481,40 @@ def compile_resume_outputs(renderable: dict, budget: dict, paths: dict) -> tuple
 
 
 # --- pipeline ----------------------------------------------------------------
+def analyze_jd(jd_text: str, profile: dict):
+    """Run Stage 1 only and store keywords + pre-scan in session state."""
+    with st.status("Extracting keywords (Sonnet)…", expanded=False) as status:
+        keywords = extract_keywords(jd_text)
+        u = capture_usage("Stage 1 · keywords")
+        status.update(label=f"{len(keywords)} keywords · ${u['cost']:.4f}", state="complete")
+    ss.keywords = keywords
+    ss.jd_analyzed_hash = hashlib.sha256(jd_text.encode()).hexdigest()
+    ss.pre_scan = scan_keywords_against_master(keywords, profile)
+
+
+def _apply_keywords_to_skills(delta: dict, keywords: list[str], category: str) -> dict:
+    """Append keywords (deduped) to the named skill category in a delta copy."""
+    import json as _json
+    new = _json.loads(_json.dumps(delta))
+    for i, cat in enumerate(new.get("skills") or []):
+        if cat.get("category") == category:
+            existing = ss.get(f"ed_sk_{i}", cat.get("skills", ""))
+            existing_lower = {t.strip().lower() for t in existing.split(",") if t.strip()}
+            to_add = [k for k in keywords if k.strip().lower() not in existing_lower]
+            if to_add:
+                new_val = (existing.rstrip(", ") + ", " if existing.strip() else "") + ", ".join(to_add)
+                cat["skills"] = new_val
+                ss[f"ed_sk_{i}"] = new_val
+            break
+    return new
+
+
 def run_pipeline(profile: dict, budget: dict, jd_text: str, jd_slug: str):
     if jd_slug.strip():
         (config.JD / f"{slugify(jd_slug)}.txt").write_text(jd_text, encoding="utf-8")
+
+    jd_hash = hashlib.sha256(jd_text.encode()).hexdigest()
+    pre_analyzed = bool(ss.get("keywords")) and ss.get("jd_analyzed_hash") == jd_hash
 
     profile_for_stage2 = {
         **profile,
@@ -397,21 +523,19 @@ def run_pipeline(profile: dict, budget: dict, jd_text: str, jd_slug: str):
     usages: list[dict] = []
 
     with st.status("Running pipeline…", expanded=True) as status:
-        st.write("Stage 1: extracting keywords (Sonnet)…")
-        keywords = extract_keywords(jd_text)
-        usages.append(capture_usage("Stage 1 · keywords"))
-        st.write(f"  {len(keywords)} keywords · ${usages[-1]['cost']:.4f}")
+        if pre_analyzed:
+            keywords = ss.keywords
+            st.write(f"Stage 1: using {len(keywords)} pre-extracted keywords.")
+        else:
+            st.write("Stage 1: extracting keywords (Sonnet)…")
+            keywords = extract_keywords(jd_text)
+            usages.append(capture_usage("Stage 1 · keywords"))
+            st.write(f"  {len(keywords)} keywords · ${usages[-1]['cost']:.4f}")
 
         st.write("Stage 2: tailoring (Sonnet)…")
         delta = tailor(profile_for_stage2, keywords, jd_text, budget)
         usages.append(capture_usage("Stage 2 · tailor"))
         st.write(f"  done · ${usages[-1]['cost']:.4f}")
-
-        st.write("Stage 3: fabrication audit (rapidfuzz + Haiku)…")
-        pairs = build_audit_pairs(profile_for_stage2, delta)
-        audit_res = audit(pairs)
-        usages.append(capture_usage("Stage 3 · audit"))
-        st.write(f"  {len(pairs)} bullets checked · ${usages[-1]['cost']:.4f}")
 
         st.write("Rendering LaTeX + PDF…")
         renderable = apply_delta(profile, delta, budget)
@@ -428,7 +552,7 @@ def run_pipeline(profile: dict, budget: dict, jd_text: str, jd_slug: str):
         history.save_run(
             slug, jd_text, delta, renderable,
             paths["tex"].read_text(encoding="utf-8") if paths["tex"].exists() else latex,
-            pdf_bytes_clean, audit_res, usages,
+            pdf_bytes_clean, usages, role_resume=ss.get("active_role_name", ""),
         )
 
     for k in list(ss.keys()):
@@ -436,13 +560,67 @@ def run_pipeline(profile: dict, budget: dict, jd_text: str, jd_slug: str):
             ss.pop(k, None)
     ss.keywords = keywords
     ss.tailored = delta
-    ss.audit = audit_res
     ss.latex = latex
     ss.pdf_bytes = pdf_bytes
     ss.pdf_bytes_clean = pdf_bytes_clean
     ss.usages = usages
     ss.run_id = run_id
+    ss.run_slug = slug
     ss.out_stem = str(config.run_paths(run_id)["tex"].with_suffix(""))
+    ss.kw_scan_initial = scan_keywords(keywords, delta)
+
+
+# --- project swap ------------------------------------------------------------
+def execute_project_swap():
+    swap = ss.get("_project_swap")
+    if not swap:
+        return None
+
+    profile  = ss.get("profile", {})
+    budget   = ss.get("budget", {})
+    jd_text  = ss.get("jd_text", "")
+    delta    = ss.get("tailored", {})
+
+    slot          = swap["slot"]
+    new_idx       = swap["new_master_index"]
+    mode          = swap["mode"]
+    bullet_cap    = swap["bullet_cap"]
+
+    master_proj   = profile.get("projects", []) or []
+    new_project   = master_proj[new_idx] if 0 <= new_idx < len(master_proj) else {}
+    projects      = list(delta.get("projects", []))
+
+    if mode == "verbatim":
+        raw_bullets = new_project.get("bullets", []) or []
+        bullets = [
+            {"text": b, "source": "verbatim", "original": "", "support": [],
+             "keywords_surfaced": [], "reason": ""}
+            for b in raw_bullets[:bullet_cap]
+        ]
+    else:
+        from services.budget import max_chars_per_bullet
+        max_chars = max_chars_per_bullet(budget)
+        keywords  = ss.get("keywords") or []
+        bullets   = tailor_single_project(new_project, keywords, jd_text, bullet_cap, max_chars)
+        u = capture_usage("Swap · re-tailor")
+        usages = list(ss.get("usages") or [])
+        usages.append(u)
+        ss.usages = usages
+
+    new_entry = {"master_index": new_idx, "bullets": bullets}
+    if 0 <= slot < len(projects):
+        projects[slot] = new_entry
+    else:
+        projects.append(new_entry)
+
+    new_delta = {**delta, "projects": projects}
+    del ss["_project_swap"]
+
+    for k in list(ss.keys()):
+        if k.startswith("ed_projects_"):
+            ss.pop(k, None)
+
+    return recompile_from_editor(profile, new_delta, budget)
 
 
 # --- keyword panel -----------------------------------------------------------
@@ -475,6 +653,22 @@ def keyword_panel():
             ss["scratch_notes"] = (existing + ("\n" if existing else "") + "\n".join(missing)).strip()
             st.rerun()
 
+        skill_cats = [c.get("category", "") for c in (delta.get("skills") or []) if c.get("category")]
+        if skill_cats:
+            sel_kws = st.multiselect("Add to skills", missing, key="add_to_skills_kws",
+                                     placeholder="Select gap keywords…")
+            cat_col, btn_col = st.columns([3, 1])
+            sel_cat = cat_col.selectbox("Category", skill_cats, key="add_to_skills_cat",
+                                        label_visibility="collapsed")
+            if btn_col.button("Add", icon=":material/playlist_add:", disabled=not sel_kws,
+                              use_container_width=True, key="add_to_skills_btn"):
+                new_delta = _apply_keywords_to_skills(delta, sel_kws, sel_cat)
+                err = recompile_from_editor(ss.profile, new_delta, ss.budget)
+                if err:
+                    st.error(err)
+                else:
+                    st.rerun()
+
     with st.expander(f"Covered keywords ({len(covered)})", icon=":material/check_circle:"):
         if scan["in_bullets"]:
             st.caption("In a bullet")
@@ -487,6 +681,54 @@ def keyword_panel():
             st.markdown(" ".join(f":blue-badge[{n}]" for n in scan["in_other"]))
 
     seeded(st.text_area, "Scratch notes — keywords to weave in manually later", "scratch_notes", "", height=140)
+
+
+# --- outreach panel ----------------------------------------------------------
+def outreach_panel():
+    tailored = ss.get("tailored")
+    profile = ss.get("profile")
+    jd_text = ss.get("jd_text", "")
+    if not (tailored and profile and jd_text):
+        return
+
+    with st.expander("Outreach", icon=":material/send:"):
+        st.caption("Generate a LinkedIn note and cold email tailored to this role. One extra Sonnet call (~$0.03).")
+        oc1, oc2 = st.columns(2)
+        company  = oc1.text_input("Company name", key="outreach_company", placeholder="Acme Corp")
+        recruiter = oc2.text_input("Recruiter name (optional)", key="outreach_recruiter", placeholder="Jamie")
+
+        template_options = {"No template (default)": None} | {
+            v["label"]: k for k, v in LINKEDIN_TEMPLATES.items()
+        }
+        chosen_label = st.radio(
+            "LinkedIn note style",
+            list(template_options.keys()),
+            key="outreach_template",
+            horizontal=True,
+        )
+        chosen_template = template_options[chosen_label]
+
+        if st.button("Generate outreach", icon=":material/auto_awesome:",
+                     disabled=not company.strip(), use_container_width=False):
+            with st.spinner("Writing outreach (Sonnet)…"):
+                result = generate_outreach(profile, tailored, jd_text,
+                                           company=company, recruiter_name=recruiter,
+                                           linkedin_template=chosen_template)
+            u = capture_usage("Outreach")
+            ss.outreach = result
+            st.caption(f"${u['cost']:.4f}")
+            st.rerun()
+
+        out = ss.get("outreach")
+        if out:
+            st.markdown("**LinkedIn note**")
+            note = out.get("linkedin_note", "")
+            st.code(note, language=None)
+            st.caption(f"{len(note)} / 300 characters")
+
+            st.markdown("**Cold email**")
+            st.caption(f"Subject: {out.get('email_subject', '')}")
+            st.code(out.get("email_body", ""), language=None)
 
 
 # --- structured editor -------------------------------------------------------
@@ -541,6 +783,8 @@ def sidebar_summary():
             st.markdown(f"**{contact.get('name') or 'Your resume'}**")
             if contact.get("email"):
                 st.caption(contact["email"])
+            if ss.get("active_role_name"):
+                st.caption(f":material/badge: {ss['active_role_name']}")
         b = ss.get("budget") or {}
         if valid_settings(b):
             c1, c2, c3 = st.columns(3)
@@ -549,3 +793,48 @@ def sidebar_summary():
             c3.metric("Edu", b.get("max_education", "—"))
         if ss.get("usages"):
             st.metric("Last run cost", f"${sum(u['cost'] for u in ss.usages):.4f}")
+
+        initial = ss.get("kw_scan_initial")
+        current = ss.get("kw_scan")
+        if initial and current:
+            st.divider()
+            st.caption("Keyword coverage")
+
+            total = initial.get("total", 1) or 1
+            cov_i = len(initial.get("covered", []))
+            cov_c = len(current.get("covered", []))
+            delta_n = cov_c - cov_i
+
+            m1, m2 = st.columns(2)
+            m1.metric("First tailor", f"{cov_i} / {total}")
+            delta_str = f"+{delta_n}" if delta_n >= 0 else str(delta_n)
+            m2.metric("Current", f"{cov_c} / {total}", delta=delta_str)
+
+            st.progress(cov_i / total, text=f"First tailor  {initial.get('pct', 0)}%")
+            st.progress(cov_c / total, text=f"Current  {current.get('pct', 0)}%")
+
+            with st.expander("Covered — first tailor", icon=":material/check_circle:"):
+                if initial.get("in_bullets"):
+                    st.caption("In bullets")
+                    st.markdown(" ".join(f":violet-badge[{k}]" for k in initial["in_bullets"]))
+                if initial.get("in_skills"):
+                    st.caption("In skills")
+                    st.markdown(" ".join(f":green-badge[{k}]" for k in initial["in_skills"]))
+                if initial.get("in_other"):
+                    st.caption("In role / courses")
+                    st.markdown(" ".join(f":blue-badge[{k}]" for k in initial["in_other"]))
+
+            with st.expander("Covered — current", icon=":material/check_circle:"):
+                if current.get("in_bullets"):
+                    st.caption("In bullets")
+                    st.markdown(" ".join(f":violet-badge[{k}]" for k in current["in_bullets"]))
+                if current.get("in_skills"):
+                    st.caption("In skills")
+                    st.markdown(" ".join(f":green-badge[{k}]" for k in current["in_skills"]))
+                if current.get("in_other"):
+                    st.caption("In role / courses")
+                    st.markdown(" ".join(f":blue-badge[{k}]" for k in current["in_other"]))
+
+            if current.get("missing"):
+                with st.expander(f"Gaps ({len(current['missing'])})", icon=":material/cancel:"):
+                    st.markdown(" ".join(f":red-badge[{k}]" for k in current["missing"]))

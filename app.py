@@ -17,11 +17,10 @@ ac.bootstrap()
 onboarding = st.Page("pages/1_onboarding.py", title="Onboarding", icon=":material/upload_file:")
 configure  = st.Page("pages/2_configure.py", title="Configure",  icon=":material/tune:")
 tailor     = st.Page("pages/3_tailor.py",    title="Tailor",     icon=":material/auto_awesome:")
-audit_pg   = st.Page("pages/4_audit.py",     title="Audit",      icon=":material/verified:")
-history_pg = st.Page("pages/5_history.py",   title="History",    icon=":material/history:")
+tracker_pg = st.Page("pages/5_history.py",   title="Job Tracker",icon=":material/assignment:")
 
 if ac.has_settings():
-    pages = [tailor, audit_pg, history_pg, configure, onboarding]
+    pages = [tailor, tracker_pg, configure, onboarding]
 elif ac.has_profile():
     pages = [configure, onboarding]
 else:

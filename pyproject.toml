@@ -9,5 +9,4 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "docling",
     "streamlit>=1.40",
-    "rapidfuzz>=3.14.5",
 ]

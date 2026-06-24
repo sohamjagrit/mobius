@@ -82,10 +82,45 @@ def render_experience_section(profile: dict, delta: dict, budget: dict):
 def render_projects_section(profile: dict, delta: dict, budget: dict):
     cap = max_chars_per_bullet(budget)
     proj_items = delta.get("projects", []) or []
+    master_proj = profile.get("projects", []) or []
     if not proj_items:
         st.caption("No project entries in this tailored resume.")
         return
-    _bullet_fields("projects", proj_items, profile.get("projects", []) or [], cap)
+
+    kept_indices = {item["master_index"] for item in proj_items}
+    dropped = [(i, p) for i, p in enumerate(master_proj) if i not in kept_indices]
+
+    project_bullets = budget.get("project_bullets", [])
+
+    for slot, item in enumerate(proj_items):
+        idx = item.get("master_index")
+        m = master_proj[idx] if isinstance(idx, int) and 0 <= idx < len(master_proj) else {}
+        with st.expander(_read_only_head(m, "projects"), expanded=(slot == 0)):
+            for b, bullet in enumerate(item.get("bullets", []) or []):
+                key = f"ed_projects_{slot}_{b}"
+                seeded(st.text_area, f"projects {slot} bullet {b}", key, bullet.get("text", ""),
+                       height=70, label_visibility="collapsed")
+                st.markdown(_counter_badge(len(ss.get(key, "")), cap))
+
+            if dropped:
+                with st.expander("Swap this project", icon=":material/swap_horiz:"):
+                    drop_labels = [p.get("name") or f"Project {i}" for i, p in dropped]
+                    sel = st.selectbox("Replace with", drop_labels,
+                                       key=f"swap_sel_{slot}", label_visibility="collapsed")
+                    sel_idx = dropped[drop_labels.index(sel)][0]
+                    mode = st.radio("Bullets", ["Re-tailor (~$0.03)", "Use master bullets (free)"],
+                                    key=f"swap_mode_{slot}", horizontal=True,
+                                    label_visibility="collapsed")
+                    bullet_cap = int(project_bullets[slot]) if slot < len(project_bullets) else 3
+                    if st.button("Swap", key=f"swap_btn_{slot}", icon=":material/swap_horiz:",
+                                 use_container_width=True):
+                        ss["_project_swap"] = {
+                            "slot": slot,
+                            "new_master_index": sel_idx,
+                            "mode": "retailor" if mode.startswith("Re-tailor") else "verbatim",
+                            "bullet_cap": bullet_cap,
+                        }
+                        st.rerun()
 
 
 def render_skills_section(delta: dict):
